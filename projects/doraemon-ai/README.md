@@ -53,7 +53,7 @@
 
 ### 🚧 待完成功能（后期优化）
 
-1. **打包发布** - 中优先级（下周）
+1. **应用图标优化** - 中优先级
 2. **功能增强** - 低优先级
    - 添加快捷键支持
    - 优化动画性能
@@ -109,6 +109,20 @@ npm run dev
 ```bash
 npm run build
 ```
+
+### 打包发布
+
+```bash
+# 打包 macOS 应用（.app）
+npm run dist
+
+# 或使用 electron-builder
+npx electron-builder
+```
+
+打包完成后，应用程序位于 `dist/mac-arm64/多啦B梦 AI.app`。
+
+详细部署指南请查看 [DEPLOYMENT.md](./DEPLOYMENT.md)。
 
 ### 故障排查
 

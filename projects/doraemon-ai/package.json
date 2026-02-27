@@ -9,7 +9,41 @@
     "dev:renderer": "vite",
     "dev:electron": "wait-on tcp:5173 && electron .",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder"
+  },
+  "build": {
+    "appId": "com.doraemon.ai",
+    "productName": "多啦B梦 AI",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "title": "多啦B梦 AI 安装",
+      "background": null,
+      "window": {
+        "width": 540,
+        "height": 380
+      }
+    }
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -19,6 +53,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.2",
     "electron": "^35.0.0",
+    "electron-builder": "^26.8.1",
     "vite": "^5.4.14",
     "wait-on": "^8.0.2"
   }
