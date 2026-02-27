@@ -210,12 +210,17 @@ export default function App() {
   const [emotion, setEmotion] = useState(DEFAULT_EMOTION);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [continuousMode, setContinuousMode] = useState(false);
-  const recognitionRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const mediaStreamRef = useRef(null);
   const recognitionModeRef = useRef('single');
   const continuousModeRef = useRef(false);
   const manualStopRef = useRef(false);
-  const transcriptRef = useRef('');
   const canvasRef = useRef(null);
+  const audioRef = useRef(null);
+  const startupTonePlayedRef = useRef(false);
+  const startupFilePlayedRef = useRef(false);
+  const audioCtxRef = useRef(null);
+  const audioUnlockedRef = useRef(false);
 
   useEffect(() => {
     continuousModeRef.current = continuousMode;
@@ -226,101 +231,203 @@ export default function App() {
     if (typeof window !== 'undefined') {
       window.__OPENCLAW_SESSION_KEY = 'agent:main:main';
     }
-
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setSpeechSupported(false);
+    const supported = !!(navigator?.mediaDevices?.getUserMedia && window.MediaRecorder);
+    setSpeechSupported(supported);
+    if (!supported) {
       if (typeof window !== 'undefined' && !window.isSecureContext) {
         setStatus('当前页面不是安全上下文，手机端请使用 HTTPS 才能开启语音识别');
       } else {
-        setStatus('当前浏览器不支持语音识别');
+        setStatus('当前浏览器不支持录音');
       }
-      return undefined;
     }
+    return undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    setSpeechSupported(true);
-    const recognition = new SpeechRecognition();
-    const preferredLang = navigator.language?.toLowerCase().includes('zh') ? 'zh-CN' : 'en-US';
-    recognition.lang = preferredLang;
-    recognition.continuous = false;
-    recognition.interimResults = true;
+  const pickMimeType = () => {
+    if (!window.MediaRecorder) return '';
+    const candidates = [
+      'audio/mp4',
+      'audio/m4a',
+      'audio/webm;codecs=opus',
+      'audio/webm',
+    ];
+    return candidates.find((type) => MediaRecorder.isTypeSupported(type)) || '';
+  };
 
-    recognition.onstart = () => {
-      transcriptRef.current = '';
-      setListening(true);
-      setStatus(recognitionModeRef.current === 'continuous' ? '连续聆听中...' : '正在聆听...');
-    };
+  const arrayBufferToBase64 = (buffer) => {
+    const bytes = new Uint8Array(buffer);
+    const chunkSize = 0x8000;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+  };
 
-    recognition.onresult = (event) => {
-      const results = Array.from(event.results);
-      const lastResult = results[results.length - 1];
-      const isFinal = lastResult?.isFinal;
-      const text = results
-        .map((result) => result[0]?.transcript ?? '')
-        .join('')
-        .trim();
-      
-      transcriptRef.current = text;
-      setTranscript(text);
+  const sendStt = async (blob) => {
+    const arrayBuffer = await blob.arrayBuffer();
+    const audioBase64 = arrayBufferToBase64(arrayBuffer);
+    const res = await fetch('/api/stt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        audioBase64,
+        language: navigator.language?.toLowerCase().includes('zh') ? 'zh' : 'en',
+      }),
+    });
+    const result = await res.json().catch(() => ({}));
+    if (!res.ok || !result?.success) {
+      throw new Error(result?.error || `语音识别失败 (${res.status})`);
+    }
+    return String(result?.data?.text || '').trim();
+  };
 
-      // 连续模式下，检测到句子结束时自动发送
-      if (recognitionModeRef.current === 'continuous' && isFinal && text) {
-        handleSend(text);
-      }
-    };
+  const stopStream = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+  };
 
-    recognition.onerror = (event) => {
-      if (event.error === 'no-speech') {
-        // 忽略无语音错误，保持连续监听
-        if (recognitionModeRef.current === 'continuous' && continuousModeRef.current && !manualStopRef.current) {
-          try {
-            recognition.start();
-          } catch {}
+  const startRecording = async (mode = 'single') => {
+    if (!speechSupported) {
+      setStatus('当前环境不支持录音');
+      return;
+    }
+    recognitionModeRef.current = mode;
+    manualStopRef.current = false;
+    setTranscript('');
+    setStatus(mode === 'continuous' ? '连续聆听中...' : '正在聆听...');
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      const mimeType = pickMimeType();
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      mediaRecorderRef.current = recorder;
+      const chunks = [];
+
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          chunks.push(event.data);
         }
-        return;
-      }
-      setListening(false);
-      setStatus(`语音识别出错：${event.error}`);
-      if (recognitionModeRef.current === 'continuous' && continuousModeRef.current && !manualStopRef.current) {
-        // 连续模式下出错后自动重启
-        setTimeout(() => {
-          if (continuousModeRef.current && !manualStopRef.current) {
-            try {
-              recognition.start();
-            } catch {}
+      };
+
+      recorder.onstop = async () => {
+        setListening(false);
+        stopStream();
+        if (chunks.length === 0) {
+          setStatus('未检测到语音');
+          return;
+        }
+        setStatus('识别中...');
+        try {
+          const blob = new Blob(chunks, { type: mimeType || 'audio/webm' });
+          const text = await sendStt(blob);
+          if (text) {
+            setTranscript(text);
+            handleSend(text);
+          } else {
+            setStatus('未识别到内容');
           }
-        }, 1000);
+        } catch (err) {
+          setStatus(`语音识别出错：${err.message || 'unknown'}`);
+        } finally {
+          if (recognitionModeRef.current === 'continuous' && continuousModeRef.current && !manualStopRef.current) {
+            startRecording('continuous');
+          }
+          manualStopRef.current = false;
+        }
+      };
+
+      recorder.start();
+      setListening(true);
+    } catch (err) {
+      stopStream();
+      setStatus(`无法开始录音：${err.message || 'unknown'}`);
+    }
+  };
+
+  const stopRecording = () => {
+    manualStopRef.current = true;
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.stop();
+    }
+    stopStream();
+  };
+  const playStartupTone = async () => {
+    if (startupTonePlayedRef.current) return;
+    startupTonePlayedRef.current = true;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) throw new Error('no-audio-context');
+      const ctx = audioCtxRef.current || new AudioCtx();
+      audioCtxRef.current = ctx;
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+      const oscillator = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.value = 880;
+      gainNode.gain.value = 0.15;
+      oscillator.connect(gainNode).connect(ctx.destination);
+      oscillator.start();
+      setTimeout(() => {
+        oscillator.stop();
+      }, 220);
+      audioUnlockedRef.current = true;
+      setStatus('已播放提示音');
+      playStartupFile();
+    } catch (err) {
+      setStatus('请点击一次页面以解锁声音');
+    }
+  };
+
+  const playStartupFile = () => {
+    if (startupFilePlayedRef.current) return;
+    startupFilePlayedRef.current = true;
+    try {
+      const audio = new Audio('/startup.m4a');
+      audio.preload = 'auto';
+      audio.playsInline = true;
+      audio.load();
+      audio.volume = 1.0;
+      audio.play().then(() => {
+        setStatus('启动音已播放');
+      }).catch(() => {
+        const fallback = new Audio('/startup.wav');
+        fallback.preload = 'auto';
+        fallback.playsInline = true;
+        fallback.load();
+        fallback.volume = 0.9;
+        fallback.play().then(() => {
+          setStatus('启动音已播放');
+        }).catch(() => {
+          startupFilePlayedRef.current = false;
+        });
+      });
+    } catch {
+      startupFilePlayedRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    // 尝试在页面加载后播放提示音（iOS 可能需要用户手势）
+    playStartupTone();
+    const handler = () => {
+      playStartupTone();
+      if (audioUnlockedRef.current) {
+        playStartupFile();
       }
     };
-
-    recognition.onend = () => {
-      setListening(false);
-      
-      // 单次模式下才触发对话
-      if (recognitionModeRef.current === 'single' && transcriptRef.current) {
-        setStatus('语音识别完成');
-        handleSend(transcriptRef.current);
-      } else if (recognitionModeRef.current === 'continuous' && continuousModeRef.current && !manualStopRef.current) {
-        setStatus('连续聆听恢复中...');
-        // 自动重启
-        setTimeout(() => {
-          if (continuousModeRef.current && !manualStopRef.current) {
-            try {
-              recognition.start();
-            } catch {}
-          }
-        }, 100);
-      }
-      manualStopRef.current = false;
-    };
-
-    recognitionRef.current = recognition;
-
+    window.addEventListener('touchstart', handler, { once: true, passive: true });
+    window.addEventListener('click', handler, { once: true, passive: true });
     return () => {
-      manualStopRef.current = true;
-      try {
-        recognition.stop();
-      } catch {}
+      window.removeEventListener('touchstart', handler);
+      window.removeEventListener('click', handler);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -342,30 +449,130 @@ export default function App() {
     }));
   };
 
-  const speakText = (text) => {
-    if (!('speechSynthesis' in window)) {
-      setStatus('当前环境不支持语音播放');
+  const chooseSoftVoice = (utterance) => {
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices || voices.length === 0) return;
+
+    const preferLang = utterance.lang || 'zh-CN';
+    const preferred = voices.find((voice) => {
+      const matchesLang = voice.lang?.toLowerCase().startsWith(preferLang.split('-')[0].toLowerCase());
+      const name = voice.name?.toLowerCase() || '';
+      const softHint = name.includes('female') || name.includes('woman') || name.includes('xiaoxiao')
+        || name.includes('xiaoyi') || name.includes('tingting') || name.includes('meiling');
+      return matchesLang && softHint;
+    });
+
+    if (preferred) {
+      utterance.voice = preferred;
       return;
     }
 
-    const utter = new SpeechSynthesisUtterance(text);
-    const containsLatin = /[A-Za-z]/.test(text);
-    utter.lang = containsLatin ? 'en-US' : 'zh-CN';
-    utter.rate = 1;
-    utter.onstart = () => {
-      setStatus('播放 AI 回复中...');
-      setIsSpeaking(true);
-    };
-    utter.onend = () => {
+    const fallback = voices.find((voice) => voice.lang?.toLowerCase().startsWith(preferLang.split('-')[0].toLowerCase()));
+    if (fallback) utterance.voice = fallback;
+  };
+
+  const playAudioBuffer = async (arrayBuffer) => {
+    if (!arrayBuffer) return;
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx) {
+      try {
+        const ctx = audioCtxRef.current || new AudioCtx();
+        audioCtxRef.current = ctx;
+        if (ctx.state === 'suspended') {
+          await ctx.resume();
+        }
+        const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+        const source = ctx.createBufferSource();
+        const gainNode = ctx.createGain();
+        gainNode.gain.value = 1.1;
+        source.buffer = audioBuffer;
+        source.connect(gainNode).connect(ctx.destination);
+        source.start(0);
+        setStatus('播放 AI 回复中...');
+        setIsSpeaking(true);
+        source.onended = () => {
+          setStatus('Done');
+          setIsSpeaking(false);
+        };
+        return;
+      } catch (err) {
+        // fallback to HTMLAudio below
+      }
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audioRef.current = audio;
+    audio.onended = () => {
+      URL.revokeObjectURL(url);
       setStatus('Done');
       setIsSpeaking(false);
     };
-    utter.onerror = () => {
+    audio.onerror = () => {
+      URL.revokeObjectURL(url);
+      setStatus('语音播放失败');
       setIsSpeaking(false);
     };
+    setStatus('播放 AI 回复中...');
+    setIsSpeaking(true);
+    try {
+      await audio.play();
+    } catch (err) {
+      URL.revokeObjectURL(url);
+      setStatus(`语音播放失败：${err?.name || 'unknown'}`);
+      setIsSpeaking(false);
+      throw err;
+    }
+  };
 
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utter);
+  const speakText = async (text) => {
+    const content = text?.trim();
+    if (!content) return;
+
+    try {
+      if (!('speechSynthesis' in window)) {
+        setStatus('当前环境不支持语音播放');
+        return;
+      }
+
+      const utter = new SpeechSynthesisUtterance(content);
+      const containsLatin = /[A-Za-z]/.test(content);
+      utter.lang = containsLatin ? 'en-US' : 'zh-CN';
+      utter.rate = 1.05;
+      utter.pitch = 1.35;
+      utter.onstart = () => {
+        setStatus('播放 AI 回复中...');
+        setIsSpeaking(true);
+      };
+      utter.onend = () => {
+        setStatus('Done');
+        setIsSpeaking(false);
+      };
+      utter.onerror = () => {
+        setIsSpeaking(false);
+      };
+
+      const startSpeak = () => {
+        chooseSoftVoice(utter);
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(utter);
+      };
+
+      if (window.speechSynthesis.getVoices().length === 0) {
+        window.speechSynthesis.onvoiceschanged = () => {
+          startSpeak();
+          window.speechSynthesis.onvoiceschanged = null;
+        };
+      } else {
+        startSpeak();
+      }
+    } catch {
+      setIsSpeaking(false);
+    }
   };
 
   // 模拟 AI 回复（fallback）
@@ -523,32 +730,11 @@ export default function App() {
   };
 
   const startListening = (mode = 'single') => {
-    const recognition = recognitionRef.current;
-    if (!recognition) {
-      setStatus('当前浏览器不支持语音识别');
-      return;
-    }
-
-    recognitionModeRef.current = mode;
-    manualStopRef.current = false;
-    recognition.continuous = mode === 'continuous';
-
-    try {
-      recognition.start();
-    } catch (err) {
-      // 调用过快会抛出异常
-      setStatus(`无法开始录音：${err.message}`);
-    }
+    startRecording(mode);
   };
 
   const stopListening = () => {
-    const recognition = recognitionRef.current;
-    if (!recognition) return;
-
-    manualStopRef.current = true;
-    try {
-      recognition.stop();
-    } catch {}
+    stopRecording();
   };
 
   return (

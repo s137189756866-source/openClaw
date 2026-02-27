@@ -80,11 +80,24 @@ export async function sendChat({ messages, stream = false, onToken, sessionKey: 
   }
 
   // Browser fallback: local bridge endpoint (prefers Qwen if configured).
-  const res = await fetch('/api/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: content, sessionKey, messages }),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  let res;
+  try {
+    res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: content, sessionKey, messages }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('请求超时');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 
   const result = await res.json().catch(() => ({}));
   if (!res.ok || !result?.success) {

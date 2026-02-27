@@ -42,6 +42,7 @@ export async function sendChatThroughQwen({
   apiBase,
   model,
   temperature = 0.7,
+  timeoutMs = 20000,
 }) {
   const key = apiKey || process.env.QWEN_API_KEY;
   if (!key) throw new Error('缺少 QWEN_API_KEY');
@@ -59,14 +60,28 @@ export async function sendChatThroughQwen({
     temperature,
   };
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${key}`,
-    },
-    body: JSON.stringify(payload),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('Qwen API 请求超时');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');

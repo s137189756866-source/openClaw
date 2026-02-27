@@ -2,7 +2,6 @@ import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sendChatThroughGateway } from '../bridge/openclawGateway.js';
-import { sendChatThroughQwen } from '../bridge/qwenClient.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,19 +18,11 @@ ipcMain.handle('send-chat', async (_event, payload) => {
   if (!key) return { success: false, error: '缺少 sessionKey' };
 
   try {
-    let reply = '';
-    if (process.env.QWEN_API_KEY) {
-      const merged = Array.isArray(messages) && messages.length > 0
-        ? messages
-        : [{ role: 'user', content: message.trim() }];
-      reply = await sendChatThroughQwen({ messages: merged });
-    } else {
-      reply = await sendChatThroughGateway({
-        message: message.trim(),
-        sessionKey: key,
-        userAgent: `doraemon-ai/${app.getVersion?.() || 'dev'}`,
-      });
-    }
+    const reply = await sendChatThroughGateway({
+      message: message.trim(),
+      sessionKey: key,
+      userAgent: `doraemon-ai/${app.getVersion?.() || 'dev'}`,
+    });
     return { success: true, data: { reply: (reply || '').trim() } };
   } catch (error) {
     console.error('OpenClaw gateway error:', error);
