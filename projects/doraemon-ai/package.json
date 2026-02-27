@@ -17,14 +17,17 @@
     "appId": "com.doraemon.ai",
     "productName": "多啦B梦 AI",
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "build"
     },
     "files": [
       "electron/**/*",
       "dist/**/*",
       "package.json"
     ],
+    "icon": "build/icon.png",
     "mac": {
+      "icon": "build/icon.icns",
       "category": "public.app-category.productivity",
       "target": [
         {

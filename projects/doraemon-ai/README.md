@@ -16,6 +16,15 @@
 
 ## 项目状态
 
+### 🎨 图标状态
+
+🔴 **图标开发中** - 临时使用占位符
+
+快速生成图标:
+- 使用 AI 生成: Midjourney/DALL-E (提示词见 [ICON_DESIGN.md](./ICON_DESIGN.md))
+- 在线工具: [Canva](https://www.canva.com/) 或 [IconKitchen](https://icon.kitchen/)
+- 详细指南: [ICON_DESIGN.md](./ICON_DESIGN.md) | [build/ICON_README.md](./build/ICON_README.md)
+
 ### ✅ 已完成功能（100% 完成）🎉
 
 1. **基础架构**

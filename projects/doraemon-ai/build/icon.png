@@ -1,0 +1,12 @@
+This is a placeholder for the Windows/Linux icon file.
+
+To create a proper icon:
+
+1. Design a 1024x1024 PNG icon (see ICON_DESIGN.md for guidelines)
+2. Replace this file with your icon
+
+For Windows (.ico), you can use:
+- https://cloudconvert.com/png-to-ico
+- https://convertio.co/png-ico/
+
+For Linux, PNG is sufficient.
