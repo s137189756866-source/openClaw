@@ -128,26 +128,182 @@ npx electron-builder
 
 #### 问题：无法连接 OpenClaw Gateway
 
+**症状**：应用启动后显示"无法连接 Gateway"或 AI 对话无响应
+
 **解决方案**：
-1. 检查 Gateway 是否运行：
+1. **检查 Gateway 是否运行**：
    ```bash
    curl http://127.0.0.1:18789/health
    ```
-2. 检查设备身份是否存在：
+   如果返回 "ok"，说明 Gateway 正在运行。
+
+2. **检查设备身份是否存在**：
    ```bash
    ls -la ~/.openclaw/identity/device.json
    ```
-3. 检查 Gateway Token：
+   如果不存在，需要先配置设备身份。
+
+3. **检查 Gateway Token**：
    ```bash
    cat ~/.openclaw/openclaw.json | grep -A 5 '"auth"'
    ```
+   确保设备有有效的 Gateway Token。
+
+4. **重启 Gateway**：
+   ```bash
+   openclaw gateway restart
+   ```
+
+5. **检查网络端口**：
+   ```bash
+   lsof -i :18789
+   ```
+   确保端口 18789 没有被其他程序占用。
 
 #### 问题：语音识别不工作
 
+**症状**：点击语音按钮后没有反应，或识别结果不准确
+
 **解决方案**：
-1. 确保已授予麦克风权限
-2. 检查系统设置 → 隐私与安全性 → 麦克风
-3. 重启应用
+1. **检查麦克风权限**：
+   - 系统设置 → 隐私与安全性 → 麦克风
+   - 确保"多啦B梦 AI"已被勾选
+
+2. **测试麦克风硬件**：
+   - 打开"系统设置 → 声音"
+   - 在"输入"选项卡中测试麦克风是否正常
+
+3. **重启应用**：
+   - 完全退出应用后重新启动
+
+4. **检查浏览器控制台**：
+   - 按 `Cmd+Option+I` 打开开发者工具
+   - 查看 Console 是否有错误信息
+
+5. **尝试使用文本输入**：
+   - 如果语音识别持续失败，可以使用文本输入框作为备用方案
+
+#### 问题：语音合成无声音
+
+**症状**：AI 回复显示但听不到声音
+
+**解决方案**：
+1. **检查系统音量**：
+   - 确保系统音量不是静音状态
+
+2. **检查音频输出设备**：
+   - 系统设置 → 声音 → 输出
+   - 确保选择了正确的音频输出设备
+
+3. **手动触发 TTS**：
+   - 在设置中重新配置 TTS 参数
+
+4. **检查 WebSocket 连接**：
+   - 打开开发者工具（`Cmd+Option+I`）
+   - 查看 Network 标签页的 WebSocket 连接状态
+
+#### 问题：应用无法启动
+
+**症状**：双击 .app 文件后无反应
+
+**解决方案**：
+1. **检查 macOS 安全限制**：
+   ```bash
+   xattr -cr "dist/mac-arm64/多啦B梦 AI.app"
+   ```
+
+2. **从终端启动**（查看错误信息）：
+   ```bash
+   open "dist/mac-arm64/多啦B梦 AI.app"
+   ```
+
+3. **检查系统兼容性**：
+   - 确保 macOS 版本 ≥ 11.0（Big Sur）
+
+4. **重新安装依赖**：
+   ```bash
+   cd /Users/nj_boy_dev/.openclaw/workspace/projects/doraemon-ai
+   rm -rf node_modules
+   npm install
+   npm run dist
+   ```
+
+#### 问题：AI 回复速度慢
+
+**症状**：从说话到听到 AI 回复延迟很高
+
+**解决方案**：
+1. **检查网络连接**：
+   - 确保网络稳定，延迟低
+
+2. **检查 Gateway 状态**：
+   ```bash
+   openclaw gateway status
+   ```
+
+3. **优化模型配置**：
+   - 在设置中切换到更快的模型（如 `gpt-3.5-turbo`）
+
+4. **检查 TTS 服务**：
+   - 如果使用远程 TTS 服务，可能是网络延迟导致
+
+#### 问题：虚拟形象不显示
+
+**症状**：窗口空白或看不到多啦B梦
+
+**解决方案**：
+1. **检查浏览器控制台**：
+   - 按 `Cmd+Option+I` 打开开发者工具
+   - 查看 Console 是否有 Canvas 相关错误
+
+2. **重启应用**：
+   - 完全退出后重新启动
+
+3. **检查透明窗口支持**：
+   - 确保系统支持透明窗口（macOS 原生支持）
+
+### 调试技巧
+
+#### 启用详细日志
+
+打开开发者工具（`Cmd+Option+I`），查看 Console 中的详细日志：
+
+- `STT:` - 语音识别相关
+- `TTS:` - 语音合成相关
+- `AI:` - AI 对话相关
+- `Gateway:` - Gateway 通信相关
+
+#### 清除配置
+
+如果配置导致问题，可以在设置中点击"清空配置"，然后重新配置。
+
+#### 重置应用状态
+
+```bash
+# 删除本地存储
+rm -rf ~/Library/Application\ Support/多啦B梦\ AI/
+
+# 重新启动应用
+open "dist/mac-arm64/多啦B梦 AI.app"
+```
+
+### 错误代码说明
+
+| 错误代码 | 说明 | 解决方案 |
+|---------|------|---------|
+| `GATEWAY_CONNECTION_FAILED` | 无法连接到 Gateway | 检查 Gateway 是否运行 |
+| `DEVICE_NOT_FOUND` | 设备身份不存在 | 配置设备身份 |
+| `AUTH_FAILED` | 认证失败 | 检查 Gateway Token |
+| `STT_NOT_SUPPORTED` | 浏览器不支持语音识别 | 使用 Chrome/Edge |
+| `TTS_ERROR` | 语音合成失败 | 检查网络或切换 TTS 服务 |
+| `AI_RATE_LIMIT` | API 调用频率限制 | 稍后重试 |
+
+### 获取帮助
+
+如果以上方法都无法解决问题，请：
+1. 记录错误信息（截图或复制日志）
+2. 记录复现步骤
+3. 联系开发者或提交 Issue
 
 ## 项目结构
 
