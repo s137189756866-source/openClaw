@@ -13,7 +13,8 @@ function readSessionKeyFromWindow() {
   if (typeof window === 'undefined') return undefined;
 
   try {
-    const fromUrl = new URLSearchParams(window.location.search).get('sessionKey');
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get('sessionKey') || params.get('session');
     if (fromUrl) return fromUrl.trim();
   } catch {
     // ignore
