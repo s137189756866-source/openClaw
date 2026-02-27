@@ -389,6 +389,7 @@ export default function App() {
     }
     const ws = new WebSocket(wsUrlFor('/ws/tts'));
     ttsWsRef.current = ws;
+    ttsStateRef.current.textQueue = [];
     ws.onmessage = async (evt) => {
       let msg;
       try {
@@ -453,6 +454,18 @@ export default function App() {
       }
       if (msg.type === 'error') {
         setStatus(`TTS 出错：${msg.message || 'unknown'}`);
+      }
+    };
+    ws.onopen = () => {
+      if (ttsStateRef.current.textQueue?.length) {
+        const queued = ttsStateRef.current.textQueue.slice();
+        ttsStateRef.current.textQueue = [];
+        queued.forEach((text) => {
+          try {
+            ws.send(JSON.stringify({ type: 'cancel' }));
+            ws.send(JSON.stringify({ type: 'speak', text }));
+          } catch {}
+        });
       }
     };
     return ws;
@@ -525,7 +538,7 @@ export default function App() {
       const ctx = new AudioCtx();
       captureCtxRef.current = ctx;
       const source = ctx.createMediaStreamSource(stream);
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      const processor = ctx.createScriptProcessor(2048, 1, 1);
       processorRef.current = processor;
       source.connect(processor);
       const silence = ctx.createGain();
@@ -533,7 +546,7 @@ export default function App() {
       processor.connect(silence);
       silence.connect(ctx.destination);
 
-      const threshold = 0.02;
+      const threshold = 0.010;
       const silenceStopMs = 650;
       const maxSingleMs = 3500;
 
@@ -808,8 +821,12 @@ export default function App() {
           ws.send(JSON.stringify({ type: 'speak', text: content }));
         } catch {}
       };
-      if (ws.readyState === WebSocket.OPEN) sendSpeak();
-      else ws.addEventListener('open', sendSpeak, { once: true });
+      if (ws.readyState === WebSocket.OPEN) {
+        sendSpeak();
+      } else {
+        ttsStateRef.current.textQueue ||= [];
+        ttsStateRef.current.textQueue.push(content);
+      }
       return;
     } catch (error) {
       setStatus(`TTS 失败，回退系统语音：${error?.message || 'unknown'}`);
