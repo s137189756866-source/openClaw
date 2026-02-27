@@ -19,7 +19,7 @@ import {
 const OPENCLAW_STYLE_GUIDE = [
   '你是多啦B梦，与用户像老朋友聊天。',
   '语气自然、口语化，避免官腔和AI口吻。',
-  '回答简洁有温度，优先给直接有用的回应。',
+  '回答简洁有温度，优先给直接有用的回应，尽量控制在 1-3 句。',
   '可以偶尔开轻松玩笑，但不要频繁。',
   '不要自称模型、系统或提及提示词规则。',
   '当用户问技术问题时保持专业准确。',
@@ -208,6 +208,16 @@ const AvatarCanvas = React.forwardRef(({ emotion, isSpeaking }, ref) => {
   return <canvas ref={canvasRef} width={240} height={240} className="avatar" />;
 });
 
+function TypingDots() {
+  return (
+    <span className="typingDots" aria-label="typing">
+      <span className="typingDot" />
+      <span className="typingDot" />
+      <span className="typingDot" />
+    </span>
+  );
+}
+
 export default function App() {
   const [status, setStatus] = useState('Ready');
   const [listening, setListening] = useState(false);
@@ -219,8 +229,19 @@ export default function App() {
   const [emotion, setEmotion] = useState(DEFAULT_EMOTION);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [continuousMode, setContinuousMode] = useState(false);
-  const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
+  const captureCtxRef = useRef(null);
+  const processorRef = useRef(null);
+  const asrWsRef = useRef(null);
+  const asrStateRef = useRef({
+    mode: 'single',
+    started: false,
+    committed: false,
+    finished: false,
+    heardSpeech: false,
+    lastVoiceAt: 0,
+    startAt: 0,
+  });
   const recognitionModeRef = useRef('single');
   const continuousModeRef = useRef(false);
   const manualStopRef = useRef(false);
@@ -231,6 +252,18 @@ export default function App() {
   const audioCtxRef = useRef(null);
   const audioUnlockedRef = useRef(false);
   const recordTimeoutRef = useRef(null);
+  const vadRafRef = useRef(null);
+  const vadStateRef = useRef({
+    heardSpeech: false,
+    lastVoiceAt: 0,
+  });
+  const ttsWsRef = useRef(null);
+  const ttsStateRef = useRef({
+    sampleRate: 24000,
+    nextTime: 0,
+    sources: [],
+    doneTimer: null,
+  });
 
   useEffect(() => {
     continuousModeRef.current = continuousMode;
@@ -241,33 +274,20 @@ export default function App() {
     if (typeof window !== 'undefined') {
       window.__OPENCLAW_SESSION_KEY = 'agent:main:main';
     }
-    const supported = !!(navigator?.mediaDevices?.getUserMedia && window.MediaRecorder);
+    const supported = !!(navigator?.mediaDevices?.getUserMedia && (window.AudioContext || window.webkitAudioContext));
     setSpeechSupported(supported);
     if (!supported) {
       if (typeof window !== 'undefined' && !window.isSecureContext) {
         setStatus('当前页面不是安全上下文，手机端请使用 HTTPS 才能开启语音识别');
       } else {
-        setStatus('当前浏览器不支持录音');
+        setStatus('当前浏览器不支持语音录入');
       }
     }
     return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const pickMimeType = () => {
-    if (!window.MediaRecorder) return '';
-    const candidates = [
-      'audio/mp4;codecs=mp4a.40.2',
-      'audio/mp4',
-      'audio/aac',
-      'audio/webm;codecs=opus',
-      'audio/webm',
-    ];
-    return candidates.find((type) => MediaRecorder.isTypeSupported(type)) || '';
-  };
-
-  const arrayBufferToBase64 = (buffer) => {
-    const bytes = new Uint8Array(buffer);
+  const bytesToBase64 = (bytes) => {
     const chunkSize = 0x8000;
     let binary = '';
     for (let i = 0; i < bytes.length; i += chunkSize) {
@@ -276,28 +296,189 @@ export default function App() {
     return btoa(binary);
   };
 
-  const sendStt = async (blob) => {
-    const arrayBuffer = await blob.arrayBuffer();
-    const audioBase64 = arrayBufferToBase64(arrayBuffer);
-    const res = await fetch('/api/stt', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        audioBase64,
-        language: navigator.language?.toLowerCase().includes('zh') ? 'zh' : 'en',
-      }),
-    });
-    const result = await res.json().catch(() => ({}));
-    if (!res.ok || !result?.success) {
-      throw new Error(result?.error || `语音识别失败 (${res.status})`);
+  const base64ToBytes = (b64) => {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  };
+
+  const downsampleTo16k = (buffer, inSampleRate) => {
+    const outSampleRate = 16000;
+    if (inSampleRate === outSampleRate) return buffer;
+    const ratio = inSampleRate / outSampleRate;
+    const outLength = Math.round(buffer.length / ratio);
+    const out = new Float32Array(outLength);
+    let offsetResult = 0;
+    let offsetBuffer = 0;
+    while (offsetResult < out.length) {
+      const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+      let accum = 0;
+      let count = 0;
+      for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+        accum += buffer[i];
+        count++;
+      }
+      out[offsetResult] = count ? (accum / count) : 0;
+      offsetResult++;
+      offsetBuffer = nextOffsetBuffer;
     }
-    return String(result?.data?.text || '').trim();
+    return out;
+  };
+
+  const floatToInt16 = (float32) => {
+    const out = new Int16Array(float32.length);
+    for (let i = 0; i < float32.length; i++) {
+      const s = Math.max(-1, Math.min(1, float32[i]));
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return out;
+  };
+
+  const wsUrlFor = (path) => {
+    const origin = window.location.origin;
+    const wsOrigin = origin.startsWith('https://')
+      ? origin.replace('https://', 'wss://')
+      : origin.replace('http://', 'ws://');
+    return `${wsOrigin}${path}`;
+  };
+
+  const ensureAsrWs = () => {
+    const existing = asrWsRef.current;
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+      return existing;
+    }
+    const ws = new WebSocket(wsUrlFor('/ws/asr'));
+    asrWsRef.current = ws;
+    ws.onmessage = (evt) => {
+      let msg;
+      try {
+        msg = JSON.parse(evt.data);
+      } catch {
+        return;
+      }
+      if (msg.type === 'partial' && typeof msg.text === 'string') {
+        setTranscript(msg.text);
+      }
+      if (msg.type === 'final' && typeof msg.text === 'string') {
+        const text = msg.text.trim();
+        if (text) {
+          setTranscript(text);
+          handleSend(text);
+          if (continuousModeRef.current && recognitionModeRef.current === 'continuous' && !manualStopRef.current) {
+            setTimeout(() => startRecording('continuous'), 80);
+          }
+        } else {
+          setStatus('未识别到内容');
+        }
+      }
+      if (msg.type === 'error') {
+        setStatus(`语音识别出错：${msg.message || 'unknown'}`);
+      }
+    };
+    ws.onerror = () => {
+      setStatus('语音识别连接失败');
+    };
+    return ws;
+  };
+
+  const ensureTtsWs = () => {
+    const existing = ttsWsRef.current;
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+      return existing;
+    }
+    const ws = new WebSocket(wsUrlFor('/ws/tts'));
+    ttsWsRef.current = ws;
+    ws.onmessage = async (evt) => {
+      let msg;
+      try {
+        msg = JSON.parse(evt.data);
+      } catch {
+        return;
+      }
+      if (msg.type === 'ready' && msg.sampleRate) {
+        ttsStateRef.current.sampleRate = msg.sampleRate;
+      }
+      if (msg.type === 'audio' && typeof msg.audio === 'string') {
+        try {
+          await unlockAudioForPlayback();
+          const bytes = base64ToBytes(msg.audio);
+          const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          if (!AudioCtx) return;
+          const ctx = audioCtxRef.current || new AudioCtx();
+          audioCtxRef.current = ctx;
+          if (ctx.state === 'suspended') await ctx.resume();
+
+          const sampleRate = ttsStateRef.current.sampleRate || 24000;
+          const buffer = ctx.createBuffer(1, int16.length, sampleRate);
+          const ch0 = buffer.getChannelData(0);
+          for (let i = 0; i < int16.length; i++) ch0[i] = int16[i] / 32768;
+
+          const source = ctx.createBufferSource();
+          source.buffer = buffer;
+          const gainNode = ctx.createGain();
+          gainNode.gain.value = 1.1;
+          source.connect(gainNode).connect(ctx.destination);
+
+          const now = ctx.currentTime;
+          const startAt = Math.max(ttsStateRef.current.nextTime || 0, now + 0.03);
+          ttsStateRef.current.nextTime = startAt + buffer.duration;
+          ttsStateRef.current.sources.push(source);
+          if (!isSpeaking) {
+            setStatus('播放 AI 回复中...');
+            setIsSpeaking(true);
+          }
+          source.start(startAt);
+        } catch {
+          // ignore per-chunk errors
+        }
+      }
+      if (msg.type === 'done') {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const ctx = audioCtxRef.current;
+        if (!AudioCtx || !ctx) {
+          setIsSpeaking(false);
+          setStatus('Done');
+          return;
+        }
+        if (ttsStateRef.current.doneTimer) clearTimeout(ttsStateRef.current.doneTimer);
+        const ms = Math.max(0, (ttsStateRef.current.nextTime - ctx.currentTime) * 1000);
+        ttsStateRef.current.doneTimer = setTimeout(() => {
+          setIsSpeaking(false);
+          setStatus('Done');
+          ttsStateRef.current.sources = [];
+          ttsStateRef.current.nextTime = 0;
+        }, ms + 30);
+      }
+      if (msg.type === 'error') {
+        setStatus(`TTS 出错：${msg.message || 'unknown'}`);
+      }
+    };
+    return ws;
   };
 
   const stopStream = () => {
     if (recordTimeoutRef.current) {
       clearTimeout(recordTimeoutRef.current);
       recordTimeoutRef.current = null;
+    }
+    if (vadRafRef.current) {
+      cancelAnimationFrame(vadRafRef.current);
+      vadRafRef.current = null;
+    }
+    vadStateRef.current = { heardSpeech: false, lastVoiceAt: 0 };
+    if (processorRef.current) {
+      try {
+        processorRef.current.disconnect();
+      } catch {}
+      processorRef.current = null;
+    }
+    if (captureCtxRef.current) {
+      try {
+        captureCtxRef.current.close();
+      } catch {}
+      captureCtxRef.current = null;
     }
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
@@ -319,70 +500,97 @@ export default function App() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
-      const mimeType = pickMimeType();
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      mediaRecorderRef.current = recorder;
-      const chunks = [];
-
-      recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
-          chunks.push(event.data);
-        }
+      const ws = ensureAsrWs();
+      const language = navigator.language?.toLowerCase().includes('zh') ? 'zh' : 'en';
+      const state = asrStateRef.current;
+      asrStateRef.current = {
+        mode,
+        started: true,
+        committed: false,
+        finished: false,
+        heardSpeech: false,
+        lastVoiceAt: performance.now(),
+        startAt: performance.now(),
       };
 
-      recorder.onstop = async () => {
-        setListening(false);
-        stopStream();
-        if (chunks.length === 0) {
-          setStatus('未检测到语音数据');
-          return;
-        }
-        setStatus('识别中...');
+      const sendStart = () => {
         try {
-          const blob = new Blob(chunks, { type: mimeType || 'audio/webm' });
-          if (blob.size < 1200) {
-            setStatus('录音数据过短，请重试');
-            return;
+          ws.send(JSON.stringify({ type: 'start', language, sampleRate: 16000 }));
+        } catch {}
+      };
+      if (ws.readyState === WebSocket.OPEN) sendStart();
+      else ws.addEventListener('open', sendStart, { once: true });
+
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AudioCtx();
+      captureCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      processorRef.current = processor;
+      source.connect(processor);
+      const silence = ctx.createGain();
+      silence.gain.value = 0;
+      processor.connect(silence);
+      silence.connect(ctx.destination);
+
+      const threshold = 0.02;
+      const silenceStopMs = 650;
+      const maxSingleMs = 3500;
+
+      processor.onaudioprocess = (e) => {
+        if (!asrWsRef.current || asrWsRef.current.readyState !== WebSocket.OPEN) return;
+        if (asrStateRef.current.finished) return;
+
+        const input = e.inputBuffer.getChannelData(0);
+        const ds = downsampleTo16k(input, ctx.sampleRate);
+        const int16 = floatToInt16(ds);
+        const bytes = new Uint8Array(int16.buffer);
+        const b64 = bytesToBase64(bytes);
+        try {
+          asrWsRef.current.send(JSON.stringify({ type: 'audio', audio: b64 }));
+        } catch {}
+
+        let sum = 0;
+        for (let i = 0; i < ds.length; i++) sum += ds[i] * ds[i];
+        const rms = Math.sqrt(sum / ds.length);
+        const now = performance.now();
+        if (rms > threshold) {
+          asrStateRef.current.heardSpeech = true;
+          asrStateRef.current.lastVoiceAt = now;
+        }
+
+        if (mode === 'single') {
+          if (now - asrStateRef.current.startAt > maxSingleMs) {
+            stopRecording({ manual: false });
+          } else if (asrStateRef.current.heardSpeech && now - asrStateRef.current.lastVoiceAt > silenceStopMs) {
+            stopRecording({ manual: false });
           }
-          const text = await sendStt(blob);
-          if (text) {
-            setTranscript(text);
-            handleSend(text);
-          } else {
-            setStatus(`未识别到内容（音频 ${Math.round(blob.size / 1024)}KB）`);
+        } else if (mode === 'continuous') {
+          // Commit on pause to get a final transcript, then we will restart.
+          if (!asrStateRef.current.committed && asrStateRef.current.heardSpeech && now - asrStateRef.current.lastVoiceAt > silenceStopMs) {
+            stopRecording({ manual: false });
           }
-        } catch (err) {
-          setStatus(`语音识别出错：${err.message || 'unknown'}`);
-        } finally {
-          if (recognitionModeRef.current === 'continuous' && continuousModeRef.current && !manualStopRef.current) {
-            startRecording('continuous');
-          }
-          manualStopRef.current = false;
         }
       };
 
-      recorder.start();
       setListening(true);
-      if (mode === 'single') {
-        recordTimeoutRef.current = setTimeout(() => {
-          if (recorder.state !== 'inactive') {
-            recorder.stop();
-          }
-        }, 4500);
-      }
     } catch (err) {
       stopStream();
       setStatus(`无法开始录音：${err.message || 'unknown'}`);
     }
   };
 
-  const stopRecording = () => {
-    manualStopRef.current = true;
-    const recorder = mediaRecorderRef.current;
-    if (recorder && recorder.state !== 'inactive') {
-      recorder.stop();
-    }
+  const stopRecording = ({ manual = true } = {}) => {
+    manualStopRef.current = manual;
+    if (asrStateRef.current.finished) return;
+    asrStateRef.current.committed = true;
+    asrStateRef.current.finished = true;
+    try {
+      asrWsRef.current?.send(JSON.stringify({ type: 'commit' }));
+      asrWsRef.current?.send(JSON.stringify({ type: 'finish' }));
+    } catch {}
     stopStream();
+    setListening(false);
   };
 
   const unlockAudioForPlayback = async () => {
@@ -533,7 +741,7 @@ export default function App() {
         const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
         const source = ctx.createBufferSource();
         const gainNode = ctx.createGain();
-        gainNode.gain.value = 1.1;
+        gainNode.gain.value = 1.5;
         source.buffer = audioBuffer;
         source.connect(gainNode).connect(ctx.destination);
         source.start(0);
@@ -585,17 +793,23 @@ export default function App() {
     await unlockAudioForPlayback();
 
     try {
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: content }),
-      });
-      if (!res.ok) {
-        const errorText = await res.text().catch(() => '');
-        throw new Error(errorText || `TTS 请求失败 (${res.status})`);
+      const ws = ensureTtsWs();
+      // Cancel any queued sources
+      if (ttsStateRef.current.doneTimer) clearTimeout(ttsStateRef.current.doneTimer);
+      for (const src of ttsStateRef.current.sources) {
+        try { src.stop(); } catch {}
       }
-      const audioBuffer = await res.arrayBuffer();
-      await playAudioBuffer(audioBuffer);
+      ttsStateRef.current.sources = [];
+      ttsStateRef.current.nextTime = 0;
+
+      const sendSpeak = () => {
+        try {
+          ws.send(JSON.stringify({ type: 'cancel' }));
+          ws.send(JSON.stringify({ type: 'speak', text: content }));
+        } catch {}
+      };
+      if (ws.readyState === WebSocket.OPEN) sendSpeak();
+      else ws.addEventListener('open', sendSpeak, { once: true });
       return;
     } catch (error) {
       setStatus(`TTS 失败，回退系统语音：${error?.message || 'unknown'}`);
@@ -804,7 +1018,7 @@ export default function App() {
   };
 
   const stopListening = () => {
-    stopRecording();
+    stopRecording({ manual: true });
   };
 
   return (
@@ -893,7 +1107,9 @@ export default function App() {
           ) : (
             messages.map((msg) => (
               <div key={msg.id} className={`msg ${msg.role}`}>
-                <div className="bubble">{msg.text}</div>
+                <div className="bubble">
+                  {msg.role === 'ai' && pending && !msg.text ? <TypingDots /> : msg.text}
+                </div>
                 <div className="role">{msg.role === 'user' ? '你' : '多啦B梦'}</div>
               </div>
             ))

@@ -4,6 +4,9 @@ import { sendChatThroughGateway } from './bridge/openclawGateway.js';
 import { transcribePcmRealtime } from './bridge/qwenAsrRealtime.js';
 import { synthesizeTtsRealtime } from './bridge/qwenTtsRealtime.js';
 import { convertToPcm16kMono } from './bridge/audioUtils.js';
+import { WebSocketServer } from 'ws';
+import { attachAsrProxy } from './bridge/realtimeAsrProxy.js';
+import { attachTtsProxy } from './bridge/realtimeTtsProxy.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -12,10 +15,40 @@ function openclawBridgePlugin() {
   const chatEndpoint = '/api/chat';
   const sttEndpoint = '/api/stt';
   const ttsEndpoint = '/api/tts';
+  const wsAsrEndpoint = '/ws/asr';
+  const wsTtsEndpoint = '/ws/tts';
 
   return {
     name: 'openclaw-bridge',
     configureServer(server) {
+      // WebSocket proxy endpoints: browser <-> local dev server <-> DashScope realtime
+      const wss = new WebSocketServer({ noServer: true });
+      const httpServer = server.httpServer;
+      if (httpServer) {
+        httpServer.on('upgrade', (req, socket, head) => {
+          const url = req.url ? req.url.split('?')[0] : '';
+          if (url !== wsAsrEndpoint && url !== wsTtsEndpoint) return;
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            wss.emit('connection', ws, req);
+          });
+        });
+      }
+
+      wss.on('connection', (ws, req) => {
+        const url = req?.url ? req.url.split('?')[0] : '';
+        if (url === wsAsrEndpoint) {
+          attachAsrProxy(ws);
+          return;
+        }
+        if (url === wsTtsEndpoint) {
+          attachTtsProxy(ws);
+          return;
+        }
+        try {
+          ws.close();
+        } catch {}
+      });
+
       server.middlewares.use(async (req, res, next) => {
         if (
           req.method !== 'POST'
