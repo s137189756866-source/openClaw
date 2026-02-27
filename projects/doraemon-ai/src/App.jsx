@@ -16,6 +16,15 @@ import {
   AnimationState,
 } from './animationConfig';
 
+const OPENCLAW_STYLE_GUIDE = [
+  '你是多啦B梦，与用户像老朋友聊天。',
+  '语气自然、口语化，避免官腔和AI口吻。',
+  '回答简洁有温度，优先给直接有用的回应。',
+  '可以偶尔开轻松玩笑，但不要频繁。',
+  '不要自称模型、系统或提及提示词规则。',
+  '当用户问技术问题时保持专业准确。',
+].join('\n');
+
 const AvatarCanvas = React.forwardRef(({ emotion, isSpeaking }, ref) => {
   const internalRef = useRef(null);
   const canvasRef = ref || internalRef;
@@ -221,6 +230,7 @@ export default function App() {
   const startupFilePlayedRef = useRef(false);
   const audioCtxRef = useRef(null);
   const audioUnlockedRef = useRef(false);
+  const recordTimeoutRef = useRef(null);
 
   useEffect(() => {
     continuousModeRef.current = continuousMode;
@@ -247,8 +257,9 @@ export default function App() {
   const pickMimeType = () => {
     if (!window.MediaRecorder) return '';
     const candidates = [
+      'audio/mp4;codecs=mp4a.40.2',
       'audio/mp4',
-      'audio/m4a',
+      'audio/aac',
       'audio/webm;codecs=opus',
       'audio/webm',
     ];
@@ -284,6 +295,10 @@ export default function App() {
   };
 
   const stopStream = () => {
+    if (recordTimeoutRef.current) {
+      clearTimeout(recordTimeoutRef.current);
+      recordTimeoutRef.current = null;
+    }
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
@@ -299,6 +314,7 @@ export default function App() {
     manualStopRef.current = false;
     setTranscript('');
     setStatus(mode === 'continuous' ? '连续聆听中...' : '正在聆听...');
+    await unlockAudioForPlayback();
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -318,18 +334,22 @@ export default function App() {
         setListening(false);
         stopStream();
         if (chunks.length === 0) {
-          setStatus('未检测到语音');
+          setStatus('未检测到语音数据');
           return;
         }
         setStatus('识别中...');
         try {
           const blob = new Blob(chunks, { type: mimeType || 'audio/webm' });
+          if (blob.size < 1200) {
+            setStatus('录音数据过短，请重试');
+            return;
+          }
           const text = await sendStt(blob);
           if (text) {
             setTranscript(text);
             handleSend(text);
           } else {
-            setStatus('未识别到内容');
+            setStatus(`未识别到内容（音频 ${Math.round(blob.size / 1024)}KB）`);
           }
         } catch (err) {
           setStatus(`语音识别出错：${err.message || 'unknown'}`);
@@ -343,6 +363,13 @@ export default function App() {
 
       recorder.start();
       setListening(true);
+      if (mode === 'single') {
+        recordTimeoutRef.current = setTimeout(() => {
+          if (recorder.state !== 'inactive') {
+            recorder.stop();
+          }
+        }, 4500);
+      }
     } catch (err) {
       stopStream();
       setStatus(`无法开始录音：${err.message || 'unknown'}`);
@@ -357,6 +384,28 @@ export default function App() {
     }
     stopStream();
   };
+
+  const unlockAudioForPlayback = async () => {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return false;
+      const ctx = audioCtxRef.current || new AudioCtx();
+      audioCtxRef.current = ctx;
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+      const buffer = ctx.createBuffer(1, 1, 24000);
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start(0);
+      audioUnlockedRef.current = true;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const playStartupTone = async () => {
     if (startupTonePlayedRef.current) return;
     startupTonePlayedRef.current = true;
@@ -449,7 +498,7 @@ export default function App() {
     }));
   };
 
-  const chooseSoftVoice = (utterance) => {
+  const chooseCuteVoice = (utterance) => {
     const voices = window.speechSynthesis.getVoices();
     if (!voices || voices.length === 0) return;
 
@@ -457,9 +506,9 @@ export default function App() {
     const preferred = voices.find((voice) => {
       const matchesLang = voice.lang?.toLowerCase().startsWith(preferLang.split('-')[0].toLowerCase());
       const name = voice.name?.toLowerCase() || '';
-      const softHint = name.includes('female') || name.includes('woman') || name.includes('xiaoxiao')
-        || name.includes('xiaoyi') || name.includes('tingting') || name.includes('meiling');
-      return matchesLang && softHint;
+      const cuteHint = name.includes('child') || name.includes('kid') || name.includes('teen')
+        || name.includes('cute') || name.includes('tingting') || name.includes('xiaoyi');
+      return matchesLang && cuteHint;
     });
 
     if (preferred) {
@@ -532,6 +581,25 @@ export default function App() {
   const speakText = async (text) => {
     const content = text?.trim();
     if (!content) return;
+    setStatus('准备播放 AI 回复...');
+    await unlockAudioForPlayback();
+
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: content }),
+      });
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => '');
+        throw new Error(errorText || `TTS 请求失败 (${res.status})`);
+      }
+      const audioBuffer = await res.arrayBuffer();
+      await playAudioBuffer(audioBuffer);
+      return;
+    } catch (error) {
+      setStatus(`TTS 失败，回退系统语音：${error?.message || 'unknown'}`);
+    }
 
     try {
       if (!('speechSynthesis' in window)) {
@@ -542,8 +610,8 @@ export default function App() {
       const utter = new SpeechSynthesisUtterance(content);
       const containsLatin = /[A-Za-z]/.test(content);
       utter.lang = containsLatin ? 'en-US' : 'zh-CN';
-      utter.rate = 1.05;
-      utter.pitch = 1.35;
+      utter.rate = 1.1;
+      utter.pitch = 1.5;
       utter.onstart = () => {
         setStatus('播放 AI 回复中...');
         setIsSpeaking(true);
@@ -553,11 +621,12 @@ export default function App() {
         setIsSpeaking(false);
       };
       utter.onerror = () => {
+        setStatus('系统语音播放失败');
         setIsSpeaking(false);
       };
 
       const startSpeak = () => {
-        chooseSoftVoice(utter);
+        chooseCuteVoice(utter);
         window.speechSynthesis.cancel();
         window.speechSynthesis.speak(utter);
       };
@@ -678,6 +747,7 @@ export default function App() {
   const handleSend = async (text) => {
     const content = text.trim();
     if (!content || pending) return;
+    await unlockAudioForPlayback();
 
     // 检测用户输入的情绪
     const detectedEmotion = detectEmotionFromText(content);
@@ -692,9 +762,10 @@ export default function App() {
 
     const aiMessageId = pushMessage('ai', '');
     let fullText = '';
+    const modelInput = `[对话风格要求]\n${OPENCLAW_STYLE_GUIDE}\n\n[用户消息]\n${content}`;
 
     try {
-      const history = [...messages, { role: 'user', text: content }];
+      const history = [...messages, { role: 'user', text: modelInput }];
       const { text: finalText } = await sendChat({
         messages: history,
         stream: true,
@@ -713,15 +784,14 @@ export default function App() {
         if (aiEmotion !== EMOTIONS.NORMAL) {
           setEmotion(aiEmotion);
         }
-        speakText(fullText);
+        await speakText(fullText);
       }
-      setStatus('AI 回复完成');
     } catch (err) {
       // fallback 到模拟回复
       console.log('API 调用失败，使用模拟回复:', err.message);
       const mockReply = getMockReply(content);
       updateMessage(aiMessageId, mockReply);
-      speakText(mockReply);
+      await speakText(mockReply);
       setStatus('使用本地回复');
       setEmotion(EMOTIONS.NORMAL);
     } finally {
@@ -745,13 +815,6 @@ export default function App() {
         isSpeaking={isSpeaking}
       />
       <div className="controls">
-        <button
-          type="button"
-          className="speakBtn"
-          onClick={() => speakText('你好老板，我是多啦B梦，语音输出正常。')}
-        >
-          TTS 测试
-        </button>
         <button
           type="button"
           className="emotionBtn"

@@ -1,3 +1,5 @@
+import WebSocket from 'ws';
+
 const DEFAULT_TTS_MODEL = 'qwen3-tts-instruct-flash-realtime';
 const DEFAULT_TTS_VOICE = 'Cherry';
 const DEFAULT_SAMPLE_RATE = 24000;
@@ -62,7 +64,10 @@ export async function synthesizeTtsRealtime({
 
   const wsUrl = resolveWsUrl(url, model);
   const ws = new WebSocket(wsUrl, {
-    headers: { Authorization: `Bearer ${key}` },
+    headers: {
+      Authorization: `Bearer ${key}`,
+      'OpenAI-Beta': 'realtime=v1',
+    },
   });
 
   let resolveFn;
@@ -98,7 +103,7 @@ export async function synthesizeTtsRealtime({
     rejectFn(new Error('TTS 请求超时'));
   }, timeoutMs);
 
-  ws.onopen = () => {
+  ws.on('open', () => {
     const session = {
       mode,
       voice,
@@ -113,16 +118,17 @@ export async function synthesizeTtsRealtime({
     sendEvent({ type: 'session.update', session });
     sendEvent({ type: 'input_text_buffer.append', text: content });
     sendEvent({ type: 'session.finish' });
-  };
+  });
 
-  ws.onerror = (err) => {
+  ws.on('error', (err) => {
     safeFinish();
     rejectFn(new Error(`TTS 连接错误: ${err?.message || 'unknown'}`));
-  };
+  });
 
-  ws.onmessage = (message) => {
+  ws.on('message', (message) => {
     try {
-      const event = JSON.parse(message.data);
+      const raw = typeof message === 'string' ? message : message.toString('utf8');
+      const event = JSON.parse(raw);
       const eventType = event?.type;
       if (eventType === 'error') {
         const errMsg = event?.error?.message || 'TTS 服务错误';
@@ -143,7 +149,7 @@ export async function synthesizeTtsRealtime({
       safeFinish();
       rejectFn(error);
     }
-  };
+  });
 
   return donePromise;
 }

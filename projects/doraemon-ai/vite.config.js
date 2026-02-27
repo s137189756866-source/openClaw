@@ -2,6 +2,7 @@ import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import { sendChatThroughGateway } from './bridge/openclawGateway.js';
 import { transcribePcmRealtime } from './bridge/qwenAsrRealtime.js';
+import { synthesizeTtsRealtime } from './bridge/qwenTtsRealtime.js';
 import { convertToPcm16kMono } from './bridge/audioUtils.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,12 +11,16 @@ function openclawBridgePlugin() {
   const openclawEndpoint = '/api/openclaw/chat';
   const chatEndpoint = '/api/chat';
   const sttEndpoint = '/api/stt';
+  const ttsEndpoint = '/api/tts';
 
   return {
     name: 'openclaw-bridge',
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
-        if (req.method !== 'POST' || (req.url !== openclawEndpoint && req.url !== chatEndpoint && req.url !== sttEndpoint)) {
+        if (
+          req.method !== 'POST'
+          || (req.url !== openclawEndpoint && req.url !== chatEndpoint && req.url !== sttEndpoint && req.url !== ttsEndpoint)
+        ) {
           next();
           return;
         }
@@ -33,6 +38,36 @@ function openclawBridgePlugin() {
             ? payload.sessionKey.trim()
             : 'agent:main:main';
           const messages = Array.isArray(payload.messages) ? payload.messages : [];
+
+          if (req.url === ttsEndpoint) {
+            const ttsText = text || message;
+            if (!ttsText) {
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json; charset=utf-8');
+              res.end(JSON.stringify({ success: false, error: '缺少 text' }));
+              return;
+            }
+            const model = typeof payload.model === 'string' ? payload.model.trim() : (process.env.QWEN_TTS_MODEL || undefined);
+            const voice = typeof payload.voice === 'string' ? payload.voice.trim() : (process.env.QWEN_TTS_VOICE || undefined);
+            const instructions = typeof payload.instructions === 'string'
+              ? payload.instructions.trim()
+              : (process.env.QWEN_TTS_INSTRUCTIONS || undefined);
+            const url = typeof payload.url === 'string' ? payload.url.trim() : (process.env.QWEN_TTS_REALTIME_URL || undefined);
+
+            const { audioBuffer } = await synthesizeTtsRealtime({
+              text: ttsText,
+              model,
+              voice,
+              instructions,
+              url,
+            });
+
+            res.statusCode = 200;
+            res.setHeader('Content-Type', 'audio/wav');
+            res.setHeader('Cache-Control', 'no-store');
+            res.end(audioBuffer);
+            return;
+          }
 
           if (req.url === sttEndpoint) {
             const audioBase64 = typeof payload.audioBase64 === 'string' ? payload.audioBase64 : '';

@@ -1,3 +1,5 @@
+import WebSocket from 'ws';
+
 const DEFAULT_ASR_MODEL = 'qwen3-asr-flash-realtime';
 const DEFAULT_SAMPLE_RATE = 16000;
 
@@ -26,7 +28,7 @@ export async function transcribePcmRealtime({
   model = DEFAULT_ASR_MODEL,
   language = 'zh',
   sampleRate = DEFAULT_SAMPLE_RATE,
-  enableServerVad = true,
+  enableServerVad = false,
   timeoutMs = 20000,
 } = {}) {
   if (!pcmBuffer || pcmBuffer.length === 0) {
@@ -38,7 +40,10 @@ export async function transcribePcmRealtime({
 
   const wsUrl = resolveWsUrl(url, model);
   const ws = new WebSocket(wsUrl, {
-    headers: { Authorization: `Bearer ${key}` },
+    headers: {
+      Authorization: `Bearer ${key}`,
+      'OpenAI-Beta': 'realtime=v1',
+    },
   });
 
   let resolveFn;
@@ -75,17 +80,20 @@ export async function transcribePcmRealtime({
     rejectFn(new Error('语音识别超时'));
   }, timeoutMs);
 
-  ws.onopen = () => {
+  ws.on('open', () => {
     const session = {
       modalities: ['text'],
       input_audio_format: 'pcm',
       sample_rate: sampleRate,
       input_audio_transcription: {
         language,
+        model,
       },
     };
     if (enableServerVad) {
       session.turn_detection = { type: 'server_vad' };
+    } else {
+      session.turn_detection = null;
     }
     sendEvent({ type: 'session.update', session });
 
@@ -99,16 +107,17 @@ export async function transcribePcmRealtime({
       sendEvent({ type: 'input_audio_buffer.commit' });
     }
     sendEvent({ type: 'session.finish' });
-  };
+  });
 
-  ws.onerror = (err) => {
+  ws.on('error', (err) => {
     safeFinish();
     rejectFn(new Error(`ASR 连接错误: ${err?.message || 'unknown'}`));
-  };
+  });
 
-  ws.onmessage = (message) => {
+  ws.on('message', (message) => {
     try {
-      const event = JSON.parse(message.data);
+      const raw = typeof message === 'string' ? message : message.toString('utf8');
+      const event = JSON.parse(raw);
       const eventType = event?.type;
       if (eventType === 'error') {
         const errMsg = event?.error?.message || 'ASR 服务错误';
@@ -117,10 +126,20 @@ export async function transcribePcmRealtime({
         return;
       }
       if (eventType === 'conversation.item.input_audio_transcription.text') {
-        lastText = event?.text || lastText;
+        lastText = event?.text || event?.transcript || lastText;
       }
       if (eventType === 'conversation.item.input_audio_transcription.completed') {
-        finalText = event?.text || finalText;
+        finalText = event?.transcript || event?.text || finalText;
+        safeFinish();
+        resolveFn((finalText || lastText || '').trim());
+        return;
+      }
+      if (eventType === 'response.audio_transcript.delta') {
+        const deltaText = event?.delta || event?.transcript || '';
+        if (deltaText) lastText += deltaText;
+      }
+      if (eventType === 'response.audio_transcript.done') {
+        finalText = event?.transcript || event?.text || finalText;
         safeFinish();
         resolveFn((finalText || lastText || '').trim());
         return;
@@ -134,7 +153,7 @@ export async function transcribePcmRealtime({
       safeFinish();
       rejectFn(error);
     }
-  };
+  });
 
   return donePromise;
 }
