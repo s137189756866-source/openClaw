@@ -15,8 +15,6 @@ import {
   WELCOME_CONFIG,
   AnimationState,
 } from './animationConfig';
-import Settings, { loadSettings } from './Settings';
-import './Settings.css';
 
 const AvatarCanvas = React.forwardRef(({ emotion, isSpeaking }, ref) => {
   const internalRef = useRef(null);
@@ -167,8 +165,8 @@ const AvatarCanvas = React.forwardRef(({ emotion, isSpeaking }, ref) => {
       let mouthRadius = 28;
       if (animState.isSpeaking && SPEAKING_CONFIG.enabled && faceConfig.mouthType !== 'o') {
         const speakPhase = Math.sin(time * SPEAKING_CONFIG.frequency * Math.PI * 2);
-        const speakScale = SPEAKING_CONFIG.minMouth +
-          (speakPhase + 1) / 2 * (SPEAKING_CONFIG.maxMouthOpen - SPEAKING_CONFIG.minMouth);
+        const speakScale = SPEAKING_CONFIG.minMouthOpen +
+          (speakPhase + 1) / 2 * (SPEAKING_CONFIG.maxMouthOpen - SPEAKING_CONFIG.minMouthOpen);
         mouthRadius *= speakScale;
         mouthY += speakScale > 1 ? (speakScale - 1) * 5 : 0;
       }
@@ -204,6 +202,7 @@ const AvatarCanvas = React.forwardRef(({ emotion, isSpeaking }, ref) => {
 export default function App() {
   const [status, setStatus] = useState('Ready');
   const [listening, setListening] = useState(false);
+  const [speechSupported, setSpeechSupported] = useState(true);
   const [transcript, setTranscript] = useState('');
   const [inputText, setInputText] = useState('');
   const [messages, setMessages] = useState([]);
@@ -211,10 +210,16 @@ export default function App() {
   const [emotion, setEmotion] = useState(DEFAULT_EMOTION);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [continuousMode, setContinuousMode] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const recognitionRef = useRef(null);
+  const recognitionModeRef = useRef('single');
+  const continuousModeRef = useRef(false);
+  const manualStopRef = useRef(false);
   const transcriptRef = useRef('');
   const canvasRef = useRef(null);
+
+  useEffect(() => {
+    continuousModeRef.current = continuousMode;
+  }, [continuousMode]);
 
   useEffect(() => {
     // 注入 OpenClaw sessionKey（用于调用内部 AI 对话）
@@ -224,21 +229,26 @@ export default function App() {
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      setStatus('当前浏览器不支持语音识别');
+      setSpeechSupported(false);
+      if (typeof window !== 'undefined' && !window.isSecureContext) {
+        setStatus('当前页面不是安全上下文，手机端请使用 HTTPS 才能开启语音识别');
+      } else {
+        setStatus('当前浏览器不支持语音识别');
+      }
       return undefined;
     }
 
+    setSpeechSupported(true);
     const recognition = new SpeechRecognition();
     const preferredLang = navigator.language?.toLowerCase().includes('zh') ? 'zh-CN' : 'en-US';
     recognition.lang = preferredLang;
-    recognition.continuous = continuousMode; // 连续模式
+    recognition.continuous = false;
     recognition.interimResults = true;
 
     recognition.onstart = () => {
       transcriptRef.current = '';
-      setTranscript('');
       setListening(true);
-      setStatus(continuousMode ? '连续聆听中...' : '正在聆听...');
+      setStatus(recognitionModeRef.current === 'continuous' ? '连续聆听中...' : '正在聆听...');
     };
 
     recognition.onresult = (event) => {
@@ -254,17 +264,15 @@ export default function App() {
       setTranscript(text);
 
       // 连续模式下，检测到句子结束时自动发送
-      if (continuousMode && isFinal && text) {
+      if (recognitionModeRef.current === 'continuous' && isFinal && text) {
         handleSend(text);
-        transcriptRef.current = '';
-        setTranscript('');
       }
     };
 
     recognition.onerror = (event) => {
       if (event.error === 'no-speech') {
         // 忽略无语音错误，保持连续监听
-        if (continuousMode && listening) {
+        if (recognitionModeRef.current === 'continuous' && continuousModeRef.current && !manualStopRef.current) {
           try {
             recognition.start();
           } catch {}
@@ -273,10 +281,10 @@ export default function App() {
       }
       setListening(false);
       setStatus(`语音识别出错：${event.error}`);
-      if (continuousMode) {
+      if (recognitionModeRef.current === 'continuous' && continuousModeRef.current && !manualStopRef.current) {
         // 连续模式下出错后自动重启
         setTimeout(() => {
-          if (continuousMode) {
+          if (continuousModeRef.current && !manualStopRef.current) {
             try {
               recognition.start();
             } catch {}
@@ -289,27 +297,33 @@ export default function App() {
       setListening(false);
       
       // 单次模式下才触发对话
-      if (!continuousMode && transcriptRef.current) {
+      if (recognitionModeRef.current === 'single' && transcriptRef.current) {
         setStatus('语音识别完成');
         handleSend(transcriptRef.current);
-      } else if (continuousMode) {
-        setStatus('连续聆听暂停');
+      } else if (recognitionModeRef.current === 'continuous' && continuousModeRef.current && !manualStopRef.current) {
+        setStatus('连续聆听恢复中...');
         // 自动重启
         setTimeout(() => {
-          try {
-            recognition.start();
-          } catch {}
+          if (continuousModeRef.current && !manualStopRef.current) {
+            try {
+              recognition.start();
+            } catch {}
+          }
         }, 100);
       }
+      manualStopRef.current = false;
     };
 
     recognitionRef.current = recognition;
 
     return () => {
-      recognition.stop();
+      manualStopRef.current = true;
+      try {
+        recognition.stop();
+      } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [continuousMode]);
+  }, []);
 
   const pushMessage = (role, text) => {
     const id = crypto.randomUUID();
@@ -373,7 +387,7 @@ export default function App() {
         minute: '2-digit',
         second: '2-digit',
       }).format(now);
-      const date = new Intl.DateFormat('zh-CN', {
+      const date = new Intl.DateTimeFormat('zh-CN', {
         year: 'numeric',
         month: 'long',
         day: 'numeric',
@@ -508,12 +522,16 @@ export default function App() {
     }
   };
 
-  const startListening = () => {
+  const startListening = (mode = 'single') => {
     const recognition = recognitionRef.current;
     if (!recognition) {
       setStatus('当前浏览器不支持语音识别');
       return;
     }
+
+    recognitionModeRef.current = mode;
+    manualStopRef.current = false;
+    recognition.continuous = mode === 'continuous';
 
     try {
       recognition.start();
@@ -521,6 +539,16 @@ export default function App() {
       // 调用过快会抛出异常
       setStatus(`无法开始录音：${err.message}`);
     }
+  };
+
+  const stopListening = () => {
+    const recognition = recognitionRef.current;
+    if (!recognition) return;
+
+    manualStopRef.current = true;
+    try {
+      recognition.stop();
+    } catch {}
   };
 
   return (
@@ -553,42 +581,41 @@ export default function App() {
         </button>
         <button
           type="button"
-          className="settingsBtn"
-          onClick={() => setSettingsOpen(true)}
-        >
-          ⚙️ 设置
-        </button>
-        <button
-          type="button"
-          className="restartBtn"
+          className={`micBtn ${listening && recognitionModeRef.current === 'single' ? 'listening' : ''}`}
           onClick={() => {
-            if (typeof window !== 'undefined' && window.electronAPI?.restart) {
-              window.electronAPI.restart();
-            } else {
-              setStatus('重启功能仅在 Electron 模式下可用');
+            if (!speechSupported) {
+              setStatus('当前环境不支持语音识别');
+              return;
             }
+            if (listening && recognitionModeRef.current === 'single') {
+              stopListening();
+              setStatus('已停止单次录音');
+              return;
+            }
+            if (continuousMode) setContinuousMode(false);
+            startListening('single');
           }}
         >
-          🔄 重启
+          <span className="micIcon">🎙️</span>
+          {listening && recognitionModeRef.current === 'single' ? '停止单次录音' : '单次说话'}
         </button>
         <button
           type="button"
-          className={`micBtn ${listening ? 'listening' : ''} ${continuousMode ? 'continuous' : ''}`}
+          className={`micBtn ${continuousMode ? 'continuous' : ''}`}
           onClick={() => {
+            if (!speechSupported) {
+              setStatus('当前环境不支持语音识别');
+              return;
+            }
             if (continuousMode) {
-              // 停止连续模式
               setContinuousMode(false);
-              if (recognitionRef.current) {
-                recognitionRef.current.stop();
-              }
-              setStatus('已切换到单次模式');
-            } else {
-              // 开始连续模式
-              setContinuousMode(true);
-              startListening();
+              stopListening();
+              setStatus('已停止连续聆听');
+              return;
             }
+            setContinuousMode(true);
+            startListening('continuous');
           }}
-          disabled={listening && !continuousMode}
         >
           <span className="micIcon">🎤</span>
           {continuousMode ? '停止连续聆听' : '开始连续聆听'}
@@ -644,14 +671,6 @@ export default function App() {
 
       <p className="status">{status}</p>
 
-      <Settings
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        onSave={(savedSettings) => {
-          setStatus('设置已保存，可以使用 AI 对话功能了');
-          // 可以在这里重新初始化某些功能
-        }}
-      />
     </main>
   );
 }

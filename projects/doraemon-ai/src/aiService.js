@@ -67,14 +67,28 @@ export async function sendChat({ messages, stream = false, onToken, sessionKey: 
 
   const sessionKey = explicitSessionKey || resolveSessionKey();
 
-  // Only use Electron API (no CORS issues)
-  if (typeof window === 'undefined' || !window.electronAPI?.sendChat) {
-    throw new Error('缺少 Electron API，无法发送消息');
+  // Prefer Electron IPC when available.
+  if (typeof window !== 'undefined' && window.electronAPI?.sendChat) {
+    const result = await window.electronAPI.sendChat({ message: content, sessionKey });
+    if (!result?.success) {
+      throw new Error(result?.error || 'API 调用失败');
+    }
+
+    const reply = result.data?.reply || result.data?.message || result.data?.text || '';
+    if (onToken && reply) onToken(reply);
+    return { text: reply };
   }
 
-  const result = await window.electronAPI.sendChat({ message: content, sessionKey });
-  if (!result?.success) {
-    throw new Error(result?.error || 'API 调用失败');
+  // Browser fallback: local bridge endpoint (prefers Qwen if configured).
+  const res = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: content, sessionKey, messages }),
+  });
+
+  const result = await res.json().catch(() => ({}));
+  if (!res.ok || !result?.success) {
+    throw new Error(result?.error || `bridge 调用失败 (${res.status})`);
   }
 
   const reply = result.data?.reply || result.data?.message || result.data?.text || '';
