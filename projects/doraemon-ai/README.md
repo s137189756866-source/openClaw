@@ -113,6 +113,51 @@ npm run dev
 1. Vite 开发服务器（http://localhost:5173）
 2. Electron 桌面窗口
 
+### iPhone（iOS）局域网访问 HTTPS（完美版）
+
+部分 iOS 浏览器会直接拦截自签名 HTTPS，表现为“无法访问”。推荐使用 `mkcert` 生成带局域网 IP 的证书，并让 iPhone 信任 `mkcert` 根证书（一次配置，之后都好用）。
+
+#### 1) 生成局域网证书 + 导出 iOS 可安装根证书
+
+在项目目录运行：
+
+```bash
+npm run cert:lan
+```
+
+生成文件：
+- `certs/lan-dev.pem` / `certs/lan-dev-key.pem`（Vite 会自动优先使用）
+- `certs/mkcert-rootCA.cer`（传到 iPhone 安装并信任）
+
+#### 2) iPhone 安装并“完全信任”根证书（一次即可）
+
+1. AirDrop `certs/mkcert-rootCA.cer` 到 iPhone
+2. 在 iPhone 上点开文件 → 提示“已下载描述文件”
+3. 进入「设置 → 通用 → VPN 与设备管理/描述文件」安装该描述文件
+4. 进入「设置 → 通用 → 关于本机 → 证书信任设置」开启对该证书的“完全信任”
+
+#### 3) 访问
+
+确保 `npm run dev` 正在运行，然后在 iPhone Safari 打开：
+- `https://你的Mac局域网IP:5173/`
+
+如果之前访问失败过，建议强制关闭 Safari 再打开一次（避免缓存的证书错误状态）。
+
+### 局域网访问（手机/其他电脑）
+
+由于开发模式默认启用自签名 HTTPS，部分移动端/内置浏览器可能会直接拦截，表现为“无法访问”。
+
+推荐启动一个局域网 HTTP 服务器（不启动 Electron）：
+
+```bash
+npm run dev:lan
+```
+
+然后在同一局域网设备访问：
+- `http://你的IP:5174/`
+
+注意：HTTP 不属于安全上下文，语音录入（麦克风）可能不可用；文本对话、UI 调试不受影响。
+
 ### 构建
 
 ```bash

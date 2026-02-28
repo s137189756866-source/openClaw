@@ -7,8 +7,6 @@ import { convertToPcm16kMono } from './bridge/audioUtils.js';
 import { WebSocketServer } from 'ws';
 import { attachAsrProxy } from './bridge/realtimeAsrProxy.js';
 import { attachTtsProxy } from './bridge/realtimeTtsProxy.js';
-import fs from 'node:fs';
-import path from 'node:path';
 
 function openclawBridgePlugin() {
   const openclawEndpoint = '/api/openclaw/chat';
@@ -21,7 +19,6 @@ function openclawBridgePlugin() {
   return {
     name: 'openclaw-bridge',
     configureServer(server) {
-      // WebSocket proxy endpoints: browser <-> local dev server <-> DashScope realtime
       const wss = new WebSocketServer({ noServer: true });
       const httpServer = server.httpServer;
       if (httpServer) {
@@ -158,21 +155,16 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   Object.assign(process.env, env);
 
-  const lanKeyPath = path.resolve('certs/lan-dev-key.pem');
-  const lanCertPath = path.resolve('certs/lan-dev.pem');
-  const httpsKeyPath = fs.existsSync(lanKeyPath) ? lanKeyPath : path.resolve('certs/localhost-key.pem');
-  const httpsCertPath = fs.existsSync(lanCertPath) ? lanCertPath : path.resolve('certs/localhost.pem');
-
   return {
     plugins: [react(), openclawBridgePlugin()],
     server: {
       host: '0.0.0.0',
-      port: 5173,
+      port: 5174,
       strictPort: true,
-      https: {
-        key: fs.readFileSync(httpsKeyPath),
-        cert: fs.readFileSync(httpsCertPath),
-      }
-    }
+      // LAN 上用 HTTP，避免移动端/内置浏览器无法跳过自签名证书导致“无法访问”。
+      // 注意：HTTP 下麦克风权限/录音可能不可用（不属于安全上下文）。
+      https: false,
+    },
   };
 });
+
